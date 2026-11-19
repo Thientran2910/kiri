@@ -2201,10 +2201,8 @@ impl Engine {
                 if !valid_container_name(&n) {
                     return Err(Error::BadRequest(format!("Invalid container name ({n}), only [a-zA-Z0-9][a-zA-Z0-9_.-] are allowed")));
                 }
-                if st.containers.values().any(|c| c.name == n) {
-                    return Err(Error::Conflict(format!(
-                        "Conflict. The container name \"/{n}\" is already in use. You have to remove (or rename) that container to be able to reuse that name."
-                    )));
+                if let Some(c) = st.containers.values().find(|c| c.name == n) {
+                    return Err(name_in_use(&n, &c.id));
                 }
                 n
             }
@@ -3382,8 +3380,8 @@ impl Engine {
         let id = {
             let mut st = self.lock();
             let id = resolve(&st, key)?;
-            if st.containers.values().any(|c| c.name == new && c.id != id) {
-                return Err(Error::Conflict(format!("Conflict. The container name \"/{new}\" is already in use by another container.")));
+            if let Some(c) = st.containers.values().find(|c| c.name == new && c.id != id) {
+                return Err(name_in_use(new, &c.id));
             }
             let c = st.containers.get_mut(&id).expect("resolved");
             if c.name == new {
@@ -4027,6 +4025,16 @@ fn valid_container_name(n: &str) -> bool {
     !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 
+/// Docker's words for a name another container has, on create and rename,
+/// naming that container. Clients match on them: Testcontainers retries its
+/// shared reaper's create only when the message says "already in use by",
+/// so without it parallel test packages fail on a reaper another one made.
+fn name_in_use(name: &str, holder: &str) -> Error {
+    Error::Conflict(format!(
+        "Conflict. The container name \"/{name}\" is already in use by container \"{holder}\". You have to remove (or rename) that container to be able to reuse that name."
+    ))
+}
+
 /// The image `name` means: a name, an ID, or `name@digest` and
 /// `name:tag@digest` by the platform manifest's digest or the index's it was
 /// pulled by.
@@ -4100,6 +4108,21 @@ mod image_lookup_tests {
         let pulled = image("alpine:latest", None);
         assert_eq!(pulled.repo_digest(), Some(format!("alpine@{ARM64}")));
         assert!(found(&[pulled], &format!("alpine:3@{ARM64}")));
+    }
+}
+
+#[cfg(test)]
+mod name_in_use_tests {
+    #[test]
+    fn a_taken_name_says_which_container_has_it_as_docker_does() {
+        let id = "4f1c".repeat(16);
+        let super::Error::Conflict(m) = super::name_in_use("reaper_1", &id) else { panic!("not a conflict") };
+        assert_eq!(
+            m,
+            format!("Conflict. The container name \"/reaper_1\" is already in use by container \"{id}\". You have to remove (or rename) that container to be able to reuse that name.")
+        );
+        // What Testcontainers for Go matches before it retries its reaper.
+        assert!(m.contains("The container name \"/reaper_1\" is already in use by "));
     }
 }
 
